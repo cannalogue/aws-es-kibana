@@ -9,6 +9,7 @@ var stream = require('stream');
 var figlet = require('figlet');
 var basicAuth = require('basic-auth-connect');
 var compress = require('compression');
+var aws4 = require('aws4');
 
 var yargs = require('yargs')
     .usage('usage: $0 [options] <aws-es-cluster-endpoint>')
@@ -116,35 +117,66 @@ app.use(compress());
 if (argv.u && argv.a) {
   app.use(basicAuth(argv.u, argv.a));
 }
-app.use(bodyParser.raw({limit: REQ_LIMIT, type: function() { return true; }}));
+// app.use(bodyParser.raw({limit: REQ_LIMIT, type: function() { return true; }}));
+app.use(bodyParser.text( {limit: '50mb', type: function() { return true; }} ));
 app.use(getCredentials);
 app.use(function (req, res) {
-    var bufferStream;
-    if (Buffer.isBuffer(req.body)) {
-        var bufferStream = new stream.PassThrough();
-        bufferStream.end(req.body);
-    }
-    proxy.web(req, res, {buffer: bufferStream});
+    proxy.web(req, res);
 });
 
 proxy.on('proxyReq', function (proxyReq, req) {
-    var endpoint = new AWS.Endpoint(ENDPOINT);
-    var request = new AWS.HttpRequest(endpoint);
-    request.method = proxyReq.method;
-    request.path = proxyReq.path;
-    request.region = REGION;
-    if (Buffer.isBuffer(req.body)) request.body = req.body;
-    if (!request.headers) request.headers = {};
-    request.headers['presigned-expires'] = false;
-    request.headers['Host'] = ENDPOINT;
 
-    var signer = new AWS.Signers.V4(request, 'es');
-    signer.addAuthorization(credentials, new Date());
+    var awsOptions = {
+        method: proxyReq.method,
+        path: proxyReq.path,
+        region: REGION,
+        host: 'search-cannalogue-app-dev-zokdboiwmijzfryxmglzqv3wvu.us-east-1.es.amazonaws.com',
+        service: 'es'
+    }
 
-    proxyReq.setHeader('Host', request.headers['Host']);
-    proxyReq.setHeader('X-Amz-Date', request.headers['X-Amz-Date']);
-    proxyReq.setHeader('Authorization', request.headers['Authorization']);
-    if (request.headers['x-amz-security-token']) proxyReq.setHeader('x-amz-security-token', request.headers['x-amz-security-token']);
+    if (req.headers && req.headers['content-type']) {
+        awsOptions.headers = {
+            'Content-Type' : req.headers['content-type'],
+            'kbn-version' : req.headers['kbn-version']
+        };
+    }
+    if (req.body && typeof req.body === "string" ) { 
+        awsOptions.body = req.body;
+    }
+
+    // console.log("proxyReq BODY: ", proxyReq.body);
+
+    aws4.sign(awsOptions, {accessKeyId: process.env.AWS_ACCESS_KEY_ID, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY}) // assumes AWS credentials are available in process.env
+
+    // console.log(awsOptions);
+
+    // var endpoint = new AWS.Endpoint(ENDPOINT);
+    // var request = new AWS.HttpRequest(endpoint);
+    // request.method = proxyReq.method;
+    // request.path = proxyReq.path;
+    // request.region = REGION;
+    // if (Buffer.isBuffer(req.body)) request.body = req.body;
+    // if (!request.headers) request.headers = {};
+    // request.headers['presigned-expires'] = false;
+    // request.headers['Host'] = ENDPOINT;
+
+    // var signer = new AWS.Signers.V4(request, 'es');
+    // signer.addAuthorization(credentials, new Date());
+
+    // proxyReq.setHeader('Host', request.headers['Host']);
+    // proxyReq.setHeader('X-Amz-Date', request.headers['X-Amz-Date']);
+    // proxyReq.setHeader('Authorization', request.headers['Authorization']);
+
+    for( let key in awsOptions.headers) {
+        // console.log(key, awsOptions.headers[key]);
+        proxyReq.setHeader(key, awsOptions.headers[key]);
+    }
+
+    if (req.body && typeof req.body === "string" ) { 
+        proxyReq.write(req.body);
+        proxyReq.end();
+    }
+
 });
 
 proxy.on('proxyRes', function (proxyReq, req, res) {
